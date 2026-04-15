@@ -48,7 +48,7 @@ To specify the path of the update image:
 To specify the path of the boot image collection and update image:
 
 ```bash
-    astra-update --boot-image-collection /home/user/Downloads/ \ 
+    astra-update --boot-image-collection /home/user/Downloads/ \
         astra-usbboot-images --flash /home/user/custom_sl1680_image
 ```
 
@@ -144,7 +144,7 @@ Linux requires the libudev development package to be install. On Debian / Ubuntu
 ```
 
 Building on Windows requires a minimum version of Visual Studio 2019 (SDK v142). Astra Update is using the C++17 standard which may not be
-supported on older Platform Toolsets. 
+supported on older Platform Toolsets.
 
 Building on Mac OS requires the MacOS SDK to be installed. This is included when installing Xcode. The default version is MacOSX15.2.sdk, but this can be modified by change the ``include_directories`` line in ``cmake/CMakeLists.macos.txt``.
 
@@ -156,7 +156,7 @@ Building on Mac OS requires the MacOS SDK to be installed. This is included when
 
 ### Building the Source
 
-Build the release version of tool and library using ``cmake``. 
+Build the release version of tool and library using ``cmake``.
 
 ```bash
     cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -169,6 +169,24 @@ Build a debug version using the debug build type.
     cmake -B build -DCMAKE_BUILD_TYPE=Debug
     cmake --build build --config debug
 ```
+
+### Building Linux and Windows Binaries with Docker Compose
+
+The repository includes a multi-stage `Containerfile` and a `docker-compose.yml` service which builds:
+
+* Linux binaries (`astra-update`, `astra-boot`) with static C/C++ runtime linkage
+* Windows binaries (`astra-update.exe`, `astra-boot.exe`) with static MinGW runtime linkage
+
+Run the cross-build service:
+
+```bash
+    env UID=$(id -u) GID=$(id -g) docker compose run --rm --build cross-build
+```
+
+The service uses a bind mount (`.:/workspace`) and writes artifacts directly into the workspace at:
+
+* `artifacts/linux/`
+* `artifacts/windows/`
 
 #### Building on Windows
 
@@ -205,7 +223,7 @@ Universal Binaries for Mac OS.
 
 ## Manifest Files
 
-The ``manifest.yaml`` files are used to describe boot and update images and help Astra Update determine which boot image to use for a specific update image. 
+The ``manifest.yaml`` files are used to describe boot and update images and help Astra Update determine which boot image to use for a specific update image.
 
 The boot image contains the unique id, SoC and board information, memory layout, u-boot information, and the device vendor and product ids which the tool will connect to. Boot images require a ``manifest.yaml`` to know which devices to connect to and what feature are enable in this instance of U-Boot.
 

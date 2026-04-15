@@ -1,0 +1,29 @@
+services:
+  cross-build:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: base
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        set -euo pipefail
+        BUILD_ROOT=/tmp/astra-update-build
+        rm -rf "$$BUILD_ROOT"
+
+        cmake -S /workspace -B "$$BUILD_ROOT/build-linux" -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+        cmake --build "$$BUILD_ROOT/build-linux" --config Release --parallel
+
+        cmake -S /workspace -B "$$BUILD_ROOT/build-windows" -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ -DCMAKE_EXE_LINKER_FLAGS="-static -static-libstdc++ -static-libgcc"
+        cmake --build "$$BUILD_ROOT/build-windows" --config Release --parallel
+
+        mkdir -p /workspace/artifacts/linux /workspace/artifacts/windows
+        cp "$$BUILD_ROOT/build-linux/src/astra-update" /workspace/artifacts/linux/astra-update
+        cp "$$BUILD_ROOT/build-linux/src/astra-boot" /workspace/artifacts/linux/astra-boot
+        cp "$$BUILD_ROOT/build-windows/src/astra-update.exe" /workspace/artifacts/windows/astra-update.exe
+        cp "$$BUILD_ROOT/build-windows/src/astra-boot.exe" /workspace/artifacts/windows/astra-boot.exe

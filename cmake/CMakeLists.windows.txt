@@ -4,7 +4,14 @@ message(STATUS "Configuring for Windows")
 add_definitions(-DPLATFORM_WINDOWS)
 
 # Set Windows-specific compiler flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /DWIN32 /D_WINDOWS /W3 /GR /EHsc")
+if(MSVC)
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /DWIN32 /D_WINDOWS /W3 /GR /EHsc")
+else()
+	add_definitions(-DWIN32 -D_WINDOWS)
+endif()
+
+# Windows platform libraries used by the USB transport implementation.
+set(PLATFORM_LINK_LIBRARIES setupapi cfgmgr32 ole32)
 
 # Add any Windows-specific libraries
 # Example: find_package(SomeWindowsSpecificLibrary REQUIRED)

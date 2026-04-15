@@ -1,12 +1,19 @@
 include(ExternalProject)
 include(FetchContent)
 
+set(EXTERNAL_PROJECT_TOOLCHAIN_ARGS
+    -DCMAKE_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}
+    -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+    -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+)
+
 ExternalProject_Add(libusb
     GIT_REPOSITORY https://github.com/libusb/libusb-cmake.git
     GIT_TAG v1.0.26
     PREFIX ${CMAKE_BINARY_DIR}/libusb
     CMAKE_ARGS -DBUILD_SHARED_LIBS=OFF
                -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/libusb
+               ${EXTERNAL_PROJECT_TOOLCHAIN_ARGS}
                -DCMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES}
                -DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}
 )
@@ -18,6 +25,7 @@ ExternalProject_Add(yaml-cpp
     CMAKE_ARGS -DBUILD_SHARED_LIBS=OFF
                -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/yaml-cpp
                -DYAML_CPP_BUILD_TESTS=OFF
+               ${EXTERNAL_PROJECT_TOOLCHAIN_ARGS}
                -DCMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES}
                -DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}
 )
@@ -48,13 +56,14 @@ add_dependencies(astraupdate libusb)
 
 message(CMAKE_SYSTEM_NAME=${CMAKE_SYSTEM_NAME})
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND MSVC)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         set(YAML_CPP_LIB_NAME "yaml-cppd")
     else()
         set(YAML_CPP_LIB_NAME "yaml-cpp")
     endif()
 else()
+    # MinGW and Unix-like toolchains use the lib<name>.a convention.
     set(YAML_CPP_LIB_NAME "libyaml-cpp")
 endif()
 
@@ -63,5 +72,5 @@ target_include_directories(astraupdate PRIVATE ${CMAKE_BINARY_DIR}/yaml-cpp/incl
 target_include_directories(astraupdate PRIVATE ${CMAKE_BINARY_DIR}/libusb/include)
 
 
-target_link_libraries(astraupdate PRIVATE ${CMAKE_BINARY_DIR}/libusb/lib/libusb-1.0${CMAKE_STATIC_LIBRARY_SUFFIX} ${PLATFORM_LINK_LIBRARIES})
-target_link_libraries(astraupdate PRIVATE ${CMAKE_BINARY_DIR}/yaml-cpp/lib/${YAML_CPP_LIB_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX})
+target_link_libraries(astraupdate PUBLIC ${CMAKE_BINARY_DIR}/libusb/lib/libusb-1.0${CMAKE_STATIC_LIBRARY_SUFFIX} ${PLATFORM_LINK_LIBRARIES})
+target_link_libraries(astraupdate PUBLIC ${CMAKE_BINARY_DIR}/yaml-cpp/lib/${YAML_CPP_LIB_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX})
