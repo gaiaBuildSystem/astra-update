@@ -2,6 +2,7 @@
 // Copyright 2025 Synaptics Incorporated
 
 #include <algorithm>
+#include <chrono>
 
 #include "astra_console.hpp"
 #include "astra_log.hpp"
@@ -30,6 +31,10 @@ void AstraConsole::Append(const std::string &data)
         trimmedData.rfind(m_uBootPrompt) == (trimmedData.size() - m_uBootPrompt.size()))
     {
         log(ASTRA_LOG_LEVEL_DEBUG) << "U-Boot prompt detected." << endLog;
+        {
+            std::lock_guard<std::mutex> lock(m_promptMutex);
+            m_promptDetected = true;
+        }
         m_promptCV.notify_one();
     }
 
@@ -45,17 +50,34 @@ std::string &AstraConsole::Get()
     return m_consoleData;
 }
 
-bool AstraConsole::WaitForPrompt()
+bool AstraConsole::WaitForPrompt(std::chrono::milliseconds timeout)
 {
     ASTRA_LOG;
 
     std::unique_lock<std::mutex> lock(m_promptMutex);
-    m_promptCV.wait(lock);
+
+    bool hasPrompt = false;
+    if (timeout == std::chrono::milliseconds::zero()) {
+        m_promptCV.wait(lock, [this] {
+            return m_promptDetected || m_shutdown.load();
+        });
+        hasPrompt = m_promptDetected;
+    } else {
+        hasPrompt = m_promptCV.wait_for(lock, timeout, [this] {
+            return m_promptDetected || m_shutdown.load();
+        }) && m_promptDetected;
+    }
+
     if (m_shutdown.load()) {
         return false;
     }
 
-    return true;
+    // Consume one prompt detection so callers can wait for the next prompt.
+    if (hasPrompt) {
+        m_promptDetected = false;
+    }
+
+    return hasPrompt;
 }
 
 void AstraConsole::Shutdown()

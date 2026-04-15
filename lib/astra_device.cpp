@@ -8,6 +8,18 @@
 #include <condition_variable>
 #include <mutex>
 #include <cstring>
+#include <chrono>
+#include <algorithm>
+#include <filesystem>
+#include <cstdlib>
+#include <vector>
+
+#if PLATFORM_WINDOWS
+#include <windows.h>
+#elif PLATFORM_LINUX
+#include <unistd.h>
+#include <limits.h>
+#endif
 
 #include "astra_device.hpp"
 #include "astra_device_manager.hpp"
@@ -146,6 +158,8 @@ public:
     {
         ASTRA_LOG;
 
+        constexpr auto kPromptTimeout = std::chrono::seconds(10);
+
         m_finalUpdateImage = flashImage->GetFinalImage();
         m_resetWhenComplete = flashImage->GetResetWhenComplete();
 
@@ -155,8 +169,12 @@ public:
         }
 
         if (!m_uEnvSupport && m_ubootConsole == ASTRA_UBOOT_CONSOLE_USB) {
-            if (m_console->WaitForPrompt()) {
+            if (m_console->WaitForPrompt(kPromptTimeout)) {
                 SendToConsole(flashImage->GetFlashCommand() + "\n");
+            } else {
+                SendStatus(ASTRA_DEVICE_STATUS_UPDATE_FAIL, 0, "",
+                    "Timeout waiting for U-Boot prompt before flash command");
+                return -1;
             }
         }
 
@@ -167,12 +185,31 @@ public:
     {
         ASTRA_LOG;
 
+        constexpr auto kPromptTimeout = std::chrono::seconds(10);
+
         if (m_uEnvSupport || m_ubootConsole == ASTRA_UBOOT_CONSOLE_UART) {
             for (;;) {
                 std::unique_lock<std::mutex> lock(m_deviceEventMutex);
-                m_deviceEventCV.wait(lock);
+                m_deviceEventCV.wait(lock, [this] {
+                    if (!m_running.load()) {
+                        return true;
+                    }
+
+                    if (m_bootOnly) {
+                        return m_status == ASTRA_DEVICE_STATUS_BOOT_COMPLETE ||
+                               m_status == ASTRA_DEVICE_STATUS_BOOT_FAIL;
+                    }
+
+                    return m_status == ASTRA_DEVICE_STATUS_UPDATE_COMPLETE ||
+                           m_status == ASTRA_DEVICE_STATUS_UPDATE_FAIL;
+                });
                 if (m_bootOnly) {
                     if (m_status == ASTRA_DEVICE_STATUS_BOOT_COMPLETE) {
+                        std::string uuuError;
+                        if (!RunUUUMMCHandoffIfPresent(uuuError)) {
+                            SendStatus(ASTRA_DEVICE_STATUS_BOOT_FAIL, 0, "", uuuError);
+                            return -1;
+                        }
                         // Device successfully reset after boot
                         SendStatus(m_status, 100, "", "Success");
                     }
@@ -189,7 +226,7 @@ public:
                 }
             }
         } else if (m_ubootConsole == ASTRA_UBOOT_CONSOLE_USB) {
-            if (m_console->WaitForPrompt()) {
+            if (m_console->WaitForPrompt(kPromptTimeout)) {
                 if (m_resetWhenComplete) {
                     SendToConsole("reset\n");
                 }
@@ -197,7 +234,25 @@ public:
                 // console is back at the U-Boot prompt.
                 if (m_status == ASTRA_DEVICE_STATUS_UPDATE_COMPLETE) {
                     SendStatus(m_status, 100, "", "Success");
+                } else if (m_status == ASTRA_DEVICE_STATUS_BOOT_COMPLETE) {
+                    SendStatus(m_status, 100, "", "Success");
                 }
+            } else {
+                // Some images complete without returning to a USB prompt.
+                // If completion is already known, allow clean shutdown.
+                if (m_status == ASTRA_DEVICE_STATUS_BOOT_COMPLETE ||
+                    m_status == ASTRA_DEVICE_STATUS_UPDATE_COMPLETE)
+                {
+                    SendStatus(m_status, 100, "", "Success");
+                    return 0;
+                }
+
+                if (m_status == ASTRA_DEVICE_STATUS_UPDATE_PROGRESS || m_status == ASTRA_DEVICE_STATUS_UPDATE_START) {
+                    SendStatus(ASTRA_DEVICE_STATUS_UPDATE_FAIL, 0, "", "Timeout waiting for U-Boot prompt");
+                } else if (m_status == ASTRA_DEVICE_STATUS_BOOT_PROGRESS || m_status == ASTRA_DEVICE_STATUS_BOOT_START) {
+                    SendStatus(ASTRA_DEVICE_STATUS_BOOT_FAIL, 0, "", "Timeout waiting for U-Boot prompt");
+                }
+                return -1;
             }
         }
 
@@ -276,6 +331,7 @@ private:
     bool m_uEnvSupport = false;
     std::string m_deviceName;
     bool m_resetWhenComplete;
+    bool m_uuuHandoffInvoked = false;
 
     std::mutex m_imageMutex;
     std::vector<Image> m_images;
@@ -287,12 +343,12 @@ private:
     std::thread m_imageRequestThread;
     std::condition_variable m_imageRequestCV;
     std::mutex m_imageRequestMutex;
-    std::atomic<bool> m_imageRequestReady = false;
+    std::atomic<bool> m_imageRequestReady{false};
     uint8_t m_imageType;
     std::string m_requestedImageName;
     std::condition_variable m_imageRequestThreadReadyCV;
     std::mutex m_imageRequestThreadReadyMutex;
-    std::atomic<bool> m_imageRequestThreadReady = false;
+    std::atomic<bool> m_imageRequestThreadReady{false};
     bool m_bootOnly = false;
 
     const std::string m_imageRequestString = "i*m*g*r*q*";
@@ -313,6 +369,130 @@ private:
     std::string m_bootCommand;
 
     int m_imageCount = 0;
+
+    std::filesystem::path GetExecutableDirectory()
+    {
+#if PLATFORM_WINDOWS
+        char modulePath[MAX_PATH] = {0};
+        if (GetModuleFileNameA(NULL, modulePath, MAX_PATH) > 0) {
+            return std::filesystem::path(modulePath).parent_path();
+        }
+        return std::filesystem::current_path();
+#elif PLATFORM_LINUX
+        char modulePath[PATH_MAX] = {0};
+        ssize_t len = readlink("/proc/self/exe", modulePath, sizeof(modulePath) - 1);
+        if (len > 0) {
+            modulePath[len] = '\0';
+            return std::filesystem::path(modulePath).parent_path();
+        }
+        return std::filesystem::current_path();
+#else
+        return std::filesystem::current_path();
+#endif
+    }
+
+    bool RunUUUMMCHandoffIfPresent(std::string &error)
+    {
+        ASTRA_LOG;
+
+        if (m_uuuHandoffInvoked) {
+            return true;
+        }
+        m_uuuHandoffInvoked = true;
+
+        std::filesystem::path scriptPath;
+    #if PLATFORM_WINDOWS
+        char fullPath[MAX_PATH] = {0};
+        if (GetFullPathNameA("uuu.mmc", MAX_PATH, fullPath, NULL) > 0) {
+            scriptPath = std::filesystem::path(fullPath);
+        } else {
+            scriptPath = std::filesystem::current_path() / "uuu.mmc";
+        }
+    #else
+        scriptPath = std::filesystem::current_path() / "uuu.mmc";
+    #endif
+        if (!std::filesystem::exists(scriptPath)) {
+            log(ASTRA_LOG_LEVEL_INFO) << "uuu.mmc not found in current working directory: "
+                << std::filesystem::current_path().string() << ". Skipping UUU handoff." << endLog;
+            return true;
+        }
+
+        std::filesystem::path executableDir = GetExecutableDirectory();
+        std::filesystem::path uuuPath = executableDir / "uuu";
+        if (!std::filesystem::exists(uuuPath)) {
+            uuuPath = executableDir / "uuu.exe";
+        }
+
+        if (!std::filesystem::exists(uuuPath)) {
+            error = "uuu executable not found in program directory: " + executableDir.string();
+            log(ASTRA_LOG_LEVEL_ERROR) << error << endLog;
+            return false;
+        }
+
+        std::string command = "\"" + uuuPath.string() + "\" \"" + scriptPath.string() + "\"";
+        log(ASTRA_LOG_LEVEL_INFO) << "Executing UUU handoff command: " << command << endLog;
+
+#if PLATFORM_WINDOWS
+        STARTUPINFOA startupInfo;
+        PROCESS_INFORMATION processInfo;
+        ZeroMemory(&startupInfo, sizeof(startupInfo));
+        startupInfo.cb = sizeof(startupInfo);
+        ZeroMemory(&processInfo, sizeof(processInfo));
+
+        std::vector<char> commandBuffer(command.begin(), command.end());
+        commandBuffer.push_back('\0');
+
+        BOOL created = CreateProcessA(
+            NULL,
+            commandBuffer.data(),
+            NULL,
+            NULL,
+            FALSE,
+            0,
+            NULL,
+            NULL,
+            &startupInfo,
+            &processInfo);
+
+        if (!created) {
+            DWORD createProcessError = GetLastError();
+            error = "Failed to launch UUU handoff, CreateProcess error " + std::to_string(createProcessError);
+            log(ASTRA_LOG_LEVEL_ERROR) << error << endLog;
+            return false;
+        }
+
+        WaitForSingleObject(processInfo.hProcess, INFINITE);
+
+        DWORD exitCode = 1;
+        if (!GetExitCodeProcess(processInfo.hProcess, &exitCode)) {
+            DWORD exitCodeError = GetLastError();
+            CloseHandle(processInfo.hProcess);
+            CloseHandle(processInfo.hThread);
+            error = "Failed to read UUU process exit code, GetExitCodeProcess error " + std::to_string(exitCodeError);
+            log(ASTRA_LOG_LEVEL_ERROR) << error << endLog;
+            return false;
+        }
+
+        CloseHandle(processInfo.hProcess);
+        CloseHandle(processInfo.hThread);
+
+        if (exitCode != 0) {
+            error = "UUU handoff failed with exit code " + std::to_string(exitCode);
+            log(ASTRA_LOG_LEVEL_ERROR) << error << endLog;
+            return false;
+        }
+#else
+        int ret = std::system(command.c_str());
+        if (ret != 0) {
+            error = "UUU handoff failed with exit code " + std::to_string(ret);
+            log(ASTRA_LOG_LEVEL_ERROR) << error << endLog;
+            return false;
+        }
+#endif
+
+        log(ASTRA_LOG_LEVEL_INFO) << "UUU handoff completed successfully" << endLog;
+        return true;
+    }
 
     void SendStatus(AstraDeviceStatus status, double progress, const std::string &imageName, const std::string &message = "")
     {
@@ -383,6 +563,13 @@ private:
             // cause the device to reset and reconnect. Suppress reporting this as a failure.
             if (m_requestedImageName == "gen3_miniloader.bin.usb") {
                 log(ASTRA_LOG_LEVEL_INFO) << "Device disconnected: after sending gen3_miniloader.bin.usb" << endLog;
+            } else if (m_requestedImageName == "gen3_uboot.bin.usb") {
+                log(ASTRA_LOG_LEVEL_INFO) << "Device disconnected: after sending gen3_uboot.bin.usb" << endLog;
+                if (m_bootOnly &&
+                    (m_status == ASTRA_DEVICE_STATUS_BOOT_PROGRESS || m_status == ASTRA_DEVICE_STATUS_BOOT_START))
+                {
+                    m_status = ASTRA_DEVICE_STATUS_BOOT_COMPLETE;
+                }
             } else {
                 // device disappeared or reported an error.
                 // If this occurred during boot or an update then report a failure.
@@ -549,6 +736,17 @@ private:
             if (!notified) {
                 log(ASTRA_LOG_LEVEL_DEBUG) << "Timeout waiting for image request: device status: " << AstraDeviceStatusToString(m_status) << endLog;
                 if (m_status == ASTRA_DEVICE_STATUS_BOOT_PROGRESS) {
+                    if (m_bootOnly) {
+                        // Some boot flows end after the final boot stage image is sent and
+                        // do not request additional images (for example no uEnv.txt request).
+                        // Treat this as successful completion for boot-only mode.
+                        log(ASTRA_LOG_LEVEL_INFO) << "No additional image request after boot progress in boot-only mode; marking boot complete" << endLog;
+                        m_status = ASTRA_DEVICE_STATUS_BOOT_COMPLETE;
+                        m_running.store(false);
+                        m_deviceEventCV.notify_all();
+                        return 0;
+                    }
+
                     SendStatus(ASTRA_DEVICE_STATUS_BOOT_FAIL, 0, "", "Timeout during boot, press RESET while holding USB_BOOT to try again");
                     return -1;
                 } else if (m_status == ASTRA_DEVICE_STATUS_UPDATE_COMPLETE) {
@@ -624,13 +822,14 @@ private:
                     if (!m_finalBootImage.empty() && image->GetName().find(m_finalBootImage) != std::string::npos) {
                         log(ASTRA_LOG_LEVEL_DEBUG) << "Final boot image sent" << endLog;
 
+                        m_status = ASTRA_DEVICE_STATUS_BOOT_COMPLETE;
                         if (!m_bootOnly) {
-                            // ASTRA_DEVICE_STATUS_BOOT_COMPLETE will get sent from WaitForCompletion when
-                            // in boot only mode.
-                            m_status = ASTRA_DEVICE_STATUS_BOOT_COMPLETE;
                             SendStatus(m_status, 100, "", "Success");
                         } else {
-                            waitForSizeRequest = true;
+                            // Boot-only mode can complete immediately after the final boot image.
+                            // Some U-Boot variants do not issue additional requests or prompt output.
+                            m_running.store(false);
+                            m_deviceEventCV.notify_all();
                         }
                     } else if (!m_finalUpdateImage.empty() && image->GetName().find(m_finalUpdateImage) != std::string::npos) {
                         log(ASTRA_LOG_LEVEL_DEBUG) << "Final update image sent" << endLog;

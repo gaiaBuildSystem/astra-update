@@ -242,6 +242,10 @@ private:
                 log(ASTRA_LOG_LEVEL_ERROR) << "Failed to block device enumeration, aborting device operation" << endLog;
                 m_transport->RemoveActiveDevice(astraDevice->GetUSBPath());
                 ResponseCallback({ DeviceResponse{astraDevice->GetDeviceName(), ASTRA_DEVICE_STATUS_BOOT_FAIL, 0, "", "Failed to acquire device enumeration lock"}});
+                if (!m_runContinuously) {
+                    ResponseCallback({ManagerResponse{ASTRA_DEVICE_MANAGER_STATUS_SHUTDOWN,
+                        "Astra Device Manager shutting down after failure"}});
+                }
                 return;
             }
 
@@ -256,6 +260,10 @@ private:
                     m_transport->UnblockDeviceEnumeration();
                 }
                 ResponseCallback({ DeviceResponse{astraDevice->GetDeviceName(), ASTRA_DEVICE_STATUS_BOOT_FAIL, 0, "", "Failed to Boot Device"}});
+                if (!m_runContinuously) {
+                    ResponseCallback({ManagerResponse{ASTRA_DEVICE_MANAGER_STATUS_SHUTDOWN,
+                        "Astra Device Manager shutting down after failure"}});
+                }
                 return;
             }
 
@@ -268,6 +276,10 @@ private:
                     if (enumerationBlocked) {
                         m_transport->UnblockDeviceEnumeration();
                     }
+                    if (!m_runContinuously) {
+                        ResponseCallback({ManagerResponse{ASTRA_DEVICE_MANAGER_STATUS_SHUTDOWN,
+                            "Astra Device Manager shutting down after failure"}});
+                    }
                     return;
                 }
             }
@@ -279,6 +291,10 @@ private:
                 m_transport->RemoveActiveDevice(astraDevice->GetUSBPath());
                 if (enumerationBlocked) {
                     m_transport->UnblockDeviceEnumeration();
+                }
+                if (!m_runContinuously) {
+                    ResponseCallback({ManagerResponse{ASTRA_DEVICE_MANAGER_STATUS_SHUTDOWN,
+                        "Astra Device Manager shutting down after failure"}});
                 }
                 return;
             }
